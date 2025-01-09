@@ -1,0 +1,25 @@
+[2025-01-09 12:47:03] 
+
+New training session
+
+
+[2025-01-09 12:47:03] KeywordSpottingModel_with_cls(
+  (proj): Linear(in_features=69, out_features=136, bias=True)
+  (mamba_layers): ModuleList(
+    (0-1): 2 x MambaBlock(
+      (in_proj): Linear(in_features=136, out_features=544, bias=False)
+      (conv1d): Conv1d(272, 272, kernel_size=(10,), stride=(1,), padding=(9,), groups=272)
+      (x_proj): Linear(in_features=272, out_features=111, bias=False)
+      (dt_proj): Linear(in_features=9, out_features=272, bias=True)
+      (out_proj): Linear(in_features=272, out_features=136, bias=False)
+    )
+  )
+  (layer_norms): ModuleList(
+    (0-1): 2 x LayerNorm((136,), eps=1e-05, elementwise_affine=True)
+  )
+  (fc): Linear(in_features=136, out_features=12, bias=True)
+  (dropout): Dropout(p=0.134439213335519, inplace=False)
+)
+[2025-01-09 12:52:15] Epoch 1/100, Training Loss: 1.0543, Training Accuracy: 68.96%
+[2025-01-09 12:52:47] Epoch 1/100, Validation Loss: 0.6544, Validation Accuracy: 79.25%
+[2025-01-09 12:52:47] Learning rate after epoch 1: [0.0011942156978344588]
