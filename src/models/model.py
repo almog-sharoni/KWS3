@@ -6,8 +6,11 @@ import sys
 # # import mambapy
 # from mambapy.mamba import MambaBlock as Mamba
 # from mambapy.mamba import MambaConfig
-from mambapy.mamba import MambaBlock as Mamba
-from mambapy.mamba import MambaConfig
+# from mambapy.mamba import MambaBlock as Mamba
+# from mambapy.mamba import MambaConfig
+
+from mamba_ssm import Mamba
+
 
 import torch
 
@@ -25,10 +28,10 @@ class KeywordSpottingModel_with_cls(nn.Module):
         self.mamba_layers = nn.ModuleList()
         self.layer_norms = nn.ModuleList()
 
-        mamba_config = MambaConfig(d_model=d_model, n_layers=1, d_state=d_state, expand_factor=expand, d_conv=d_conv)
+        # mamba_config = MambaConfig(d_model=d_model, n_layers=1, d_state=d_state, expand_factor=expand, d_conv=d_conv)
 
         for _ in range(num_mamba_layers):
-            self.mamba_layers.append(Mamba(mamba_config))
+            self.mamba_layers.append(Mamba(d_model=d_model, d_state=d_state, expand=expand, d_conv=d_conv))
             self.layer_norms.append(nn.LayerNorm(normalized_shape=d_model, eps=1e-5))
 
         # Output layer
