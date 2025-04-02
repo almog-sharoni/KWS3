@@ -1,3 +1,4 @@
+import tensorflow as tf
 import tensorflow_datasets as tfds
 from torch.utils.data import DataLoader, Dataset
 from librosa.feature import mfcc, delta
@@ -18,7 +19,7 @@ import tarfile
 def download_and_extract_urbansound8k(dataset_url, extract_path):
     # Define the tar.gz file path and the expected dataset directory
     tar_path = os.path.join(extract_path, 'UrbanSound8K.tar.gz')
-    dataset_dir = os.path.join(extract_path, 'UrbanSound8K')
+    dataset_dir = '/shared_data/KWS3/UrbanSound8K'
     
     # Check if the dataset directory already exists
     if os.path.exists(dataset_dir):
@@ -43,7 +44,7 @@ def download_and_extract_urbansound8k(dataset_url, extract_path):
 def load_bg_noise_dataset():
     # URL to download the UrbanSound8K dataset
     dataset_url = "https://zenodo.org/records/1203745/files/UrbanSound8K.tar.gz"
-    dataset_path = 'UrbanSound8K'
+    dataset_path = '/shared_data/KWS3/UrbanSound8K'
     
     # Ensure the dataset is downloaded and extracted
     download_and_extract_urbansound8k(dataset_url, '.')
@@ -68,12 +69,13 @@ def load_bg_noise_dataset():
 
 def load_speech_commands_dataset(version=3,reduced=False):
     """Load the Speech Commands dataset using TensorFlow Datasets."""
-    ds, info = tfds.load(f'speech_commands:0.0.{version}', with_info=True, as_supervised=True, shuffle_files=False)
-    train_ds = ds['train']
-    val_ds = ds['validation']
-    test_ds = ds['test']
+    with tf.device('/cpu:0'):
+        ds, info = tfds.load(f'speech_commands:0.0.{version}', with_info=True, as_supervised=True, shuffle_files=False)
+        train_ds = ds['train']
+        val_ds = ds['validation']
+        test_ds = ds['test']
 
-    train_silence = train_ds.filter(lambda x, y: y == 10)
+        train_silence = train_ds.filter(lambda x, y: y == 10)
 
     # Filter out the 'unknown' and 'silence' labels
     # If label = 10,11 drop

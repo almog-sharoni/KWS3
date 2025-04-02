@@ -32,7 +32,7 @@ class KeywordSpottingModel_with_cls(nn.Module):
 
         for _ in range(num_mamba_layers):
             self.mamba_layers.append(Mamba(d_model=d_model, d_state=d_state, expand=expand, d_conv=d_conv))
-            self.layer_norms.append(nn.LayerNorm(normalized_shape=d_model, eps=1e-5))
+            self.layer_norms.append(nn.RMSNorm(d_model))
 
         # Output layer
         self.fc = nn.Linear(d_model, len(label_names))  
