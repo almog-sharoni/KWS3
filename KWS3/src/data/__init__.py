@@ -1,0 +1,1 @@
+# This file initializes the data module, allowing for structured imports from the `data` package.
