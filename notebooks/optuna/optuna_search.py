@@ -1,9 +1,3 @@
-#!/usr/bin/env python
-# coding: utf-8
-
-# In[1]:
-
-
 import torch
 import numpy as np
 from torch.utils.data import DataLoader
@@ -24,58 +18,21 @@ from src.utils.train_utils import trainig_loop
 
 
 
-
-# In[2]:
-
-
 torch.cuda.is_available()
-
-
-# In[ ]:
-
-
 train_ds, val_ds, test_ds, silence_ds , info = load_speech_commands_dataset(reduced=True)
 
 
-# In[4]:
-
-
 bg_noise_ds = load_bg_noise_dataset()
-
-
-# In[5]:
-
-
 print(train_ds)
-
-
-# In[6]:
-
-
 # maintain seed for repructablity
 np.seed = 42
 # tf.random.set_seed(42)
 torch.manual_seed(0)
-
-
-# In[7]:
-
-
 label_names = ['down', 'go', 'left', 'no', 'off', 'on', 'right', 'stop', 'up', 'yes']
 print(label_names)
-
-
-# In[8]:
-
-
 # augmentations = [
 #     lambda x: add_time_shift_and_align(x),
 # ]
-
-
-# In[9]:
-
-
 # # Convert the TFDS dataset to a PyTorch Dataset
 # fixed_length = 16000
 # n_mfcc = 13
@@ -84,27 +41,13 @@ print(label_names)
 # n_mels = 40
 # pytorch_train_dataset = TFDatasetAdapter(train_ds, fixed_length, n_mfcc, n_fft, hop_length, n_mels, augmentations)
 # pytorch_val_dataset = TFDatasetAdapter(val_ds, fixed_length, n_mfcc, n_fft, hop_length, n_mels, augmentations=None)
-
-
-# In[10]:
-
-
 # # Create a DataLoader to feed the data into the model
 # batch_size = 32
 # train_loader = DataLoader(pytorch_train_dataset, batch_size=batch_size, shuffle=True,num_workers=4,prefetch_factor=2)
 # val_loader = DataLoader(pytorch_val_dataset, batch_size=batch_size, shuffle=False,num_workers=4,prefetch_factor=2)
-
-
-# In[11]:
-
-
 # for audio, label in train_loader:
 #     print(audio.shape, label.shape)
 #     break
-
-
-# In[12]:
-
 
 # # Varify Tensor's shape
 # # Example audio sample
@@ -117,19 +60,8 @@ print(label_names)
 # print(f'MFCC shape: {mfcc_features.shape}')  # Expected: (13, num_frames)
 
 
-# In[ ]:
-
-
-
-
-
-# # Training loop
-
-# # With L2 regulariztion AND Droput layer
-
-# In[13]:
-
-
+# Training loop
+# With L2 regulariztion AND Droput layer
 import optuna
 import torch
 import torch.nn as nn
@@ -205,11 +137,11 @@ def objective(trial):
         # Define DataLoader for training and validation
         train_loader = DataLoader(
             pytorch_train_dataset, batch_size=batch_size, shuffle=True,
-            num_workers=2
+            num_workers=2, prefetch_factor=2
         )
         val_loader = DataLoader(
             pytorch_val_dataset, batch_size=batch_size, shuffle=False,
-            num_workers=2
+            num_workers=2, prefetch_factor=2
         )
 
         # Init early stopping
@@ -241,7 +173,7 @@ def objective(trial):
 
     except Exception as init_e:
         log_to_file(f"Initialization error: {init_e}", "optuna.log")
-        return 0.0, 0
+        return 0.0
 
     num_epochs = 100
     for epoch in range(num_epochs):
@@ -263,7 +195,7 @@ def objective(trial):
                             log_to_file("CUDA OOM during training data transfer", "optuna.log")
                             torch.cuda.empty_cache()
                             gc.collect()
-                            return 0.0, 0
+                            return 0.0
                         else:
                             log_to_file(f"RuntimeError: {e}", "optuna.log")
                             raise
@@ -310,7 +242,7 @@ def objective(trial):
                                 log_to_file("CUDA OOM during validation data transfer", "optuna.log")
                                 torch.cuda.empty_cache()
                                 gc.collect()
-                                return 0.0, 0
+                                return 0.0
                             else:
                                 log_to_file(f"RuntimeError: {e}", "optuna.log")
                                 raise
@@ -336,11 +268,11 @@ def objective(trial):
 
             log_to_file(f"Epoch {epoch} - Validation Loss: {val_loss_avg:.4f}, Validation Accuracy: {val_accuracy:.2f}%", "optuna.log")
 
-            # # --- Pruning ---
-            # trial.report(val_accuracy, step=epoch)
-            # if trial.should_prdune():
-            #     log_to_file(f"Trial {trial.number} pruned at epoch {epoch}", "optuna.log")
-            #     raise optuna.TrialPruned()
+            # --- Pruning ---
+            trial.report(val_accuracy, step=epoch)
+            if trial.should_prune():
+                log_to_file(f"Trial {trial.number} pruned at epoch {epoch}", "optuna.log")
+                raise optuna.TrialPruned()
 
             # Step the scheduler based on validation loss
             try:
@@ -361,7 +293,7 @@ def objective(trial):
                 )
                 test_loader = DataLoader(
                     pytorch_test_dataset, batch_size=batch_size, shuffle=False,
-                    num_workers=2
+                    num_workers=2, prefetch_factor=2
                 )
             except Exception as test_loader_e:
                 log_to_file(f"Epoch {epoch} test loader creation error: {test_loader_e}", "optuna.log")
@@ -381,7 +313,7 @@ def objective(trial):
                                 log_to_file("CUDA OOM during test data transfer", "optuna.log")
                                 torch.cuda.empty_cache()
                                 gc.collect()
-                                return 0.0, 0
+                                return 0.0
                             else:
                                 log_to_file(f"RuntimeError: {e}", "optuna.log")
                                 raise
@@ -436,10 +368,10 @@ def objective(trial):
             log_to_file(f"Error writing to CSV: {csv_ex}", "optuna.log")
 
     try:
-        return val_accuracy, model_size
+        return val_accuracy
     except Exception as ret_e:
         log_to_file(f"Error returning metrics: {ret_e}", "optuna.log")
-        return 0.0, 0
+        return 0.0
 
     finally:
         # Cleanup Section: Free CUDA memory and other resources
@@ -467,12 +399,11 @@ def objective(trial):
 
 
 
-# In[ ]:
-
-
-# from optuna import samplers.NSGAIISampler
-
-sampler = optuna.samplers.NSGAIISampler()
+sampler = optuna.samplers.TPESampler(
+    multivariate=True,         # Better modeling of interactions between hyperparameters
+    group=True,                # Groups categorical variables (e.g., optimizers)
+    n_startup_trials=100        # You can increase if you have larger search space
+)
 
 # Define the storage location (a SQLite file)
 storage_name = "sqlite:///optuna_study.db"
@@ -480,7 +411,7 @@ study_name = "KWS_study_new"
 
 # Create a multi-objective study
 study = optuna.create_study(
-    directions=["maximize", "minimize"],
+    directions=["maximize"],
     sampler=sampler,  # Optional: Choose a sampler suitable for multi-objective
     study_name=study_name,
     storage=storage_name,
@@ -491,80 +422,35 @@ study = optuna.create_study(
 i = 0
 while i < 1000:
     try:
-        study.optimize(objective, n_trials=1000, show_progress_bar=False, n_jobs=8,
+        study.optimize(objective, n_trials=1000, show_progress_bar=False, n_jobs=4,
                        catch=(Exception, optuna.TrialPruned))
         i += 1
     except Exception as e:
         log_to_file(f"Error: {e}", "optuna.log")
         continue
-
-
-# In[21]:
-
-
 from optuna.visualization import plot_optimization_history
 
 fig = plot_optimization_history(study)
 fig.show()
-
-
-# In[22]:
-
-
 from optuna.visualization import plot_param_importances
 
 fig = plot_param_importances(study)
 fig.show()
-
-
-# In[23]:
-
-
 from optuna.visualization import plot_parallel_coordinate
 
 fig = plot_parallel_coordinate(study)
 fig.show()
-
-
-# In[24]:
-
-
 from optuna.visualization import plot_slice
 
 fig = plot_slice(study)
 fig.show()
-
-
-# In[ ]:
-
-
 # print study name
 print(study.study_name)
-
-
-# In[ ]:
-
-
 # save the study
 import joblib
 joblib.dump(study, 'study.pkl')
-
-
-# In[ ]:
-
-
 study.best_params
-
-
-# In[4]:
-
-
 torch.cuda.empty_cache()
-
-
-# In[6]:
-
-
 import pandas as pd
 import torch
 from utils import compute_inference_GPU_mem, print_model_size
@@ -651,10 +537,6 @@ df_results = pd.DataFrame(results)
 df_results.to_csv('results2.csv', mode='a', header=True, index=False)
 
 print("Results have been saved to results2.csv")
-
-
-# In[10]:
-
 
 import pandas as pd
 import torch
@@ -768,10 +650,3 @@ df_results = pd.DataFrame(results)
 df_results.to_csv('results2.csv', mode='a', header=True, index=False)
 
 print("Results have been saved to results2.csv")
-
-
-# In[ ]:
-
-
-
-
