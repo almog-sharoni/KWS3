@@ -13,22 +13,32 @@ from torch_optimizer import Lookahead
 from src.models.model import KeywordSpottingModel_with_cls
 from src.data.data_loader import load_speech_commands_dataset, TFDatasetAdapter, load_bg_noise_dataset
 from src.utils.utils import set_memory_GB, print_model_size, log_to_file, plot_learning_curves, EarlyStopping
-from src.utils.augmentations import add_time_shift_and_align, add_silence
+# from src.utils.augmentations import add_time_shift_and_align, add_silence
+import src.utils.augmentations as augmentations
 from src.utils.train_utils import trainig_loop
 
 
 
 torch.cuda.is_available()
-train_ds, val_ds, test_ds, silence_ds , info = load_speech_commands_dataset(reduced=True)
+# ─── load raw TF-DS splits ────────────────────────────────────────────────────
+train_tf, val_tf, test_tf, _, info = load_speech_commands_dataset(reduced=False)
 
 
-bg_noise_ds = load_bg_noise_dataset()
-print(train_ds)
+# ─── load background noise dataset ─────────────────────────────────────────────
+bg_noise_tf = load_bg_noise_dataset()          # ← original TF/NumPy
+bg_noise_ds = [
+    torch.from_numpy(n.numpy()).float()        # ⚠ adjust if already np.ndarray
+    if hasattr(n, "numpy") else torch.from_numpy(n).float()
+    for n in bg_noise_tf
+]
+# build default aug objects ONE time; reuse inside every trial
+wave_aug, spec_aug = augmentations.build_default_augs(bg_noise_ds)  # returns two callables
+
 # maintain seed for repructablity
 np.seed = 42
 # tf.random.set_seed(42)
 torch.manual_seed(0)
-label_names = ['down', 'go', 'left', 'no', 'off', 'on', 'right', 'stop', 'up', 'yes']
+label_names = ['down', 'go', 'left', 'no', 'off', 'on', 'right', 'stop', 'up', 'yes', 'silence', 'unknown']
 print(label_names)
 # augmentations = [
 #     lambda x: add_time_shift_and_align(x),
@@ -104,44 +114,69 @@ def objective(trial):
         torch.manual_seed(0)
 
         # Suggest hyperparameters
-        d_state = trial.suggest_int('d_state', 8, 64)
-        d_conv = trial.suggest_int('d_conv', 2, 16)
+        d_state = trial.suggest_int('d_state', 16, 128)
+        d_conv = trial.suggest_int('d_conv', 2, 64)
         expand = trial.suggest_int('expand', 2, 4)
         batch_size = trial.suggest_int('batch_size', 8, 64)
-        dropout_rate = trial.suggest_float('dropout_rate', 0.05, 0.7)
-        num_mamba_layers = trial.suggest_int('num_mamba_layers', 1, 4)
-        n_mfcc = trial.suggest_int('n_mfcc', 6, 26)
-        n_fft = trial.suggest_int('n_fft', 200, 800)
+        dropout_rate = trial.suggest_float('dropout_rate', 0.05, 0.5)
+        num_mamba_layers = trial.suggest_int('num_mamba_layers', 1, 8)
+        n_mfcc = trial.suggest_int('n_mfcc', 6, 40)
+        n_fft = trial.suggest_int('n_fft', 50, 800)
         hop_length = trial.suggest_int('hop_length', 20, 640)
         n_mels = trial.suggest_int('n_mels', 20, 100)
-        noise_level = trial.suggest_float('noise_level', 0.0, 0.3)
-        shift = trial.suggest_int('shift', 1, 150)
+        # noise_level = trial.suggest_float('noise_level', 0.0, 0.8)
+        # shift = trial.suggest_int('shift', 1, 150)
 
-        # Define augmentations
-        augmentations = [
-            lambda x: add_time_shift_and_align(x, shift),
-        ]
+
 
         # Convert the TFDS dataset to a PyTorch Dataset.
         # Note: Ensure train_ds, val_ds, test_ds, and bg_noise_ds are defined or loaded appropriately.
-        fixed_length = 16000
-        pytorch_train_dataset = TFDatasetAdapter(
-            train_ds, bg_noise_ds, fixed_length, n_mfcc, n_fft, hop_length, n_mels,
-            augmentation=augmentations, noise_level=noise_level
+        fixed_len = 16000
+    # ── build PyTorch datasets (adapter will do padding + aug) ─────────────
+        train_ds = TFDatasetAdapter(
+            train_tf,
+            fixed_length=fixed_len,
+            n_mfcc=n_mfcc,
+            n_fft=n_fft,
+            hop_length=hop_length,
+            n_mels=n_mels,
+            waveform_augs=[wave_aug],        # <- list!
+            spec_augs=[spec_aug],
+            derivative=True,                 # keep Δ and Δ²
+            compute_mfcc=True,
         )
-        pytorch_val_dataset = TFDatasetAdapter(
-            val_ds, None, fixed_length, n_mfcc, n_fft, hop_length, n_mels,
-            augmentation=None
+        val_ds = TFDatasetAdapter(
+            val_tf,
+            fixed_length=fixed_len,
+            n_mfcc=n_mfcc,
+            n_fft=n_fft,
+            hop_length=hop_length,
+            n_mels=n_mels,
+            waveform_augs=[],                # no aug at val / test
+            spec_augs=[],
+            derivative=True,
+            compute_mfcc=True,
         )
 
-        # Define DataLoader for training and validation
+        # ── build inverse-frequency weights for a WeightedRandomSampler ──────────
+        label_hist = np.bincount([int(l.numpy()) for _, l in train_tf], minlength=12)
+        inv_freq   = 1.0 / (label_hist + 1e-9)
+        sample_wts = [inv_freq[int(l.numpy())] for _, l in train_tf]
+
+        sampler = torch.utils.data.WeightedRandomSampler(
+            sample_wts, num_samples=len(train_tf), replacement=True
+        )
+        
+        # ── data loaders ───────────────────────────────────────────────────────
         train_loader = DataLoader(
-            pytorch_train_dataset, batch_size=batch_size, shuffle=True,
-            num_workers=2, prefetch_factor=2
+            train_ds, batch_size=batch_size,
+            sampler=sampler,
+            num_workers=4, prefetch_factor=2, pin_memory=True,
+            persistent_workers=True 
         )
         val_loader = DataLoader(
-            pytorch_val_dataset, batch_size=batch_size, shuffle=False,
-            num_workers=2, prefetch_factor=2
+            val_ds, batch_size=batch_size, shuffle=False,
+            num_workers=4, prefetch_factor=2
         )
 
         # Init early stopping
@@ -160,8 +195,8 @@ def objective(trial):
         ).to("cuda")
 
         # Define optimizer and learning rate scheduler
-        lr = trial.suggest_loguniform('lr', 1e-4, 1e-2)
-        weight_decay = trial.suggest_loguniform('weight_decay', 1e-6, 1e-4)
+        lr = trial.suggest_float('lr', 1e-4, 1e-2, log=True)
+        weight_decay = trial.suggest_float('weight_decay', 1e-6, 1e-4, log=True)
         base_optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
         optimizer = Lookahead(base_optimizer, k=5, alpha=0.5)
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=3)
@@ -288,13 +323,22 @@ def objective(trial):
             # --- Test Phase ---
             try:
                 pytorch_test_dataset = TFDatasetAdapter(
-                    test_ds, None, fixed_length, n_mfcc, n_fft, hop_length, n_mels,
-                    augmentation=None
+                    test_tf,
+                    fixed_length=fixed_len,
+                    n_mfcc=n_mfcc,
+                    n_fft=n_fft,
+                    hop_length=hop_length,
+                    n_mels=n_mels,
+                    waveform_augs=[],
+                    spec_augs=[],
+                    derivative=True,
+                    compute_mfcc=True,
                 )
                 test_loader = DataLoader(
                     pytorch_test_dataset, batch_size=batch_size, shuffle=False,
-                    num_workers=2, prefetch_factor=2
+                    num_workers=0
                 )
+
             except Exception as test_loader_e:
                 log_to_file(f"Epoch {epoch} test loader creation error: {test_loader_e}", "optuna.log")
                 continue
@@ -331,9 +375,10 @@ def objective(trial):
             test_accuracy = 100 * correct_test / total_test if total_test > 0 else 0
             log_to_file(f"Epoch {epoch} - Test Accuracy: {test_accuracy:.2f}%", "optuna.log")
 
-        except Exception as epoch_e:
-            log_to_file(f"Error in epoch {epoch}: {epoch_e}", "optuna.log")
-            continue
+        except optuna.TrialPruned:
+            log_to_file(f"Trial {trial.number} pruned at epoch {epoch}", "optuna.log")
+            # return here so Optuna marks the trial as finished
+            return val_accuracy
 
     # --- Final Evaluation ---
     try:
@@ -422,231 +467,10 @@ study = optuna.create_study(
 i = 0
 while i < 1000:
     try:
-        study.optimize(objective, n_trials=1000, show_progress_bar=False, n_jobs=4,
+        study.optimize(objective, n_trials=1000, show_progress_bar=False, n_jobs=1,
                        catch=(Exception, optuna.TrialPruned))
         i += 1
     except Exception as e:
         log_to_file(f"Error: {e}", "optuna.log")
         continue
-from optuna.visualization import plot_optimization_history
 
-fig = plot_optimization_history(study)
-fig.show()
-from optuna.visualization import plot_param_importances
-
-fig = plot_param_importances(study)
-fig.show()
-from optuna.visualization import plot_parallel_coordinate
-
-fig = plot_parallel_coordinate(study)
-fig.show()
-from optuna.visualization import plot_slice
-
-fig = plot_slice(study)
-fig.show()
-# print study name
-print(study.study_name)
-# save the study
-import joblib
-joblib.dump(study, 'study.pkl')
-study.best_params
-torch.cuda.empty_cache()
-import pandas as pd
-import torch
-from utils import compute_inference_GPU_mem, print_model_size
-from src.models.model import KeywordSpottingModel_with_cls  # Import your model class
-
-# Load the CSV file
-df_filtered = pd.read_csv('filtered_model_training_data.csv')
-
-# Iterate through the rows in the dataframe and process each configuration
-results = []
-for index, row in df_filtered.iterrows():  # Use .iterrows() to correctly iterate over rows
-    # Clear cuda
-    torch.cuda.empty_cache()
-    input_dim =  int(row['n_mfcc']) * 3  # Assuming n_mfcc as input dimension
-    d_model = int(16000 / row['hop_length'] + 1 + 1)  # Correctly access d_model from the row
-    d_state =  int(row['d_state'])
-    d_conv =  int(row['d_conv'])
-    expand =  int(row['expand'])
-    num_mamba_layers =  int(row['num_mamba_layers'])
-    dropout_rate = int(row['dropout_rate'])
-    label_names = ['label1', 'label2', 'label3', 'label4', 'label5', 'label6', 'label7', 'label8', 'label9', 'label10', 'label11', 'label12']  # Adjust based on your labels
-    
-    # Create the model
-    model = KeywordSpottingModel_with_cls(
-        input_dim=input_dim,
-        d_model=d_model,
-        d_state=d_state,
-        d_conv=d_conv,
-        expand=expand,
-        label_names=label_names,
-        num_mamba_layers=num_mamba_layers,
-        dropout_rate=dropout_rate
-    ).to("cuda")
-    
-    # Get batch size from the config
-    batch_size = int(row['batch_size'])
-    
-    # Calculate model size (MACs, params) and accuracy
-    macs, params = print_model_size(model, input_size=torch.randn(batch_size, input_dim, d_model-1).to("cuda"))
-    # other metrics
-    train_accuracy = row['train_accuracy']
-    validation_accuracy = row['validation_accuracy']
-    test_accuracy = row['test_accuracy']
-    training_epochs = row['epochs']
-    batch_size = row['batch_size']
-    lr = row['lr']
-    weight_decay = row['weight_decay']
-    noise_level = row['noise_level']
-
-    
-    # Compute inference GPU memory usage
-    inf_GPU_mem = compute_inference_GPU_mem(model, input=torch.randn(1, input_dim, d_model-1).to("cuda"))
-    
-    # Calculate inference MACs and params
-    inf_macs, inf_params = print_model_size(model, input_size=torch.randn(1, input_dim, d_model-1).to("cuda"))
-    
-    # Store the results for this model configuration
-    result = {
-        'Model': 'KeywordSpottingModel_RSM_Norm_0-1-2_order_cls_bgnoise',
-        'Training MMACs': macs / 1e6,
-        'KParams': params / 1e3,
-        'Train Accuracy': train_accuracy,
-        'Validation Accuracy': validation_accuracy,
-        'Test Accuracy': test_accuracy,
-        'Training Epochs': training_epochs,
-        'Batch Size': batch_size,
-        'Learning Rate': lr,
-        'Weight Decay': weight_decay,
-        'Noise Level': noise_level,
-        'Inference CUDA Mem in MB': inf_GPU_mem,
-        'Inference MMACs': inf_macs / 1e6,
-        'Inference KParams': inf_params / 1e3,
-        'input_dim': input_dim,
-        'd_model': d_model,
-        'd_state': d_state,
-        'd_conv': d_conv,
-        'expand': expand
-    }
-    
-    results.append(result)
-
-# Convert results to a DataFrame and save them
-df_results = pd.DataFrame(results)
-df_results.to_csv('results2.csv', mode='a', header=True, index=False)
-
-print("Results have been saved to results2.csv")
-
-import pandas as pd
-import torch
-from src.utils.utils import compute_inference_GPU_mem, print_model_size
-from src.models.model import KeywordSpottingModel_with_cls  # Import your model class
-import torch
-import gc
-import pandas as pd
-import torch
-import gc
-import pandas as pd
-
-# Initialize the results list
-results = []
-
-# Iterate over each row in the DataFrame
-for index, row in df_filtered.iterrows():
-    # Extract parameters from the current row
-    input_dim = int(row['n_mfcc']) * 3
-    d_model = int(16000 / row['hop_length'] + 2)  # Simplified
-    d_state = int(row['d_state'])
-    d_conv = int(row['d_conv'])
-    expand = int(row['expand'])
-    num_mamba_layers = int(row['num_mamba_layers'])
-    dropout_rate = float(row['dropout_rate'])  # Changed to float
-    batch_size = int(row['batch_size'])
-    train_accuracy = row['train_accuracy']
-    validation_accuracy = row['validation_accuracy']
-    test_accuracy = row['test_accuracy']
-    training_epochs = row['epochs']
-    lr = row['lr']
-    weight_decay = row['weight_decay']
-    noise_level = row['noise_level']
-    
-    label_names = [
-        'label1', 'label2', 'label3', 'label4', 'label5', 'label6',
-        'label7', 'label8', 'label9', 'label10', 'label11', 'label12'
-    ]
-    
-    # Initialize variables to None
-    model = None
-    input_tensor = None
-    inf_input = None
-
-    try:
-        with torch.no_grad():
-            # Create and move the model to GPU
-            model = KeywordSpottingModel_with_cls(
-                input_dim=input_dim,
-                d_model=d_model,
-                d_state=d_state,
-                d_conv=d_conv,
-                expand=expand,
-                label_names=label_names,
-                num_mamba_layers=num_mamba_layers,
-                dropout_rate=dropout_rate
-            ).to("cuda")
-            
-            # Generate input tensor for model size computation
-            input_tensor = torch.randn(batch_size, input_dim, d_model - 1, device="cuda")
-            macs, params = print_model_size(model, input_size=input_tensor, verbose=True)
-            
-            # Compute inference GPU memory usage
-            inf_input = torch.randn(1, input_dim, d_model - 1, device="cuda")
-            inf_GPU_mem = compute_inference_GPU_mem(model, input=inf_input)
-            
-            # Calculate inference MACs and params
-            inf_macs, inf_params = print_model_size(model, input_size=inf_input)
-            
-            # Store the results for this model configuration
-            result = {
-                'Model': 'KWS3',
-                'Training MMACs': macs / 1e6,
-                'KParams': params / 1e3,
-                'Train Accuracy': train_accuracy,
-                'Validation Accuracy': validation_accuracy,
-                'Test Accuracy': test_accuracy,
-                'Training Epochs': training_epochs,
-                'Batch Size': batch_size,
-                'Learning Rate': lr,
-                'Weight Decay': weight_decay,
-                'Noise Level': noise_level,
-                'Inference CUDA Mem in MB': inf_GPU_mem,
-                'Inference MMACs': inf_macs / 1e6,
-                'Inference KParams': inf_params / 1e3,
-                'input_dim': input_dim,
-                'd_model': d_model,
-                'd_state': d_state,
-                'd_conv': d_conv,
-                'expand': expand
-            }
-            
-            results.append(result)
-            
-    except Exception as e:
-        print(f"Error processing row {index}: {e}")
-    
-    finally:
-        # Cleanup Section
-        if model is not None:
-            del model
-        if input_tensor is not None:
-            del input_tensor
-        if inf_input is not None:
-            del inf_input
-        torch.cuda.empty_cache()
-        gc.collect()
-
-# Convert results to a DataFrame and save them
-df_results = pd.DataFrame(results)
-df_results.to_csv('results2.csv', mode='a', header=True, index=False)
-
-print("Results have been saved to results2.csv")
