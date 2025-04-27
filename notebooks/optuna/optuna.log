@@ -296,3 +296,5 @@ Epoch 16 - Training Loss: 0.9386, Training Accuracy: 68.11%
 Epoch 16 - Validation Loss: 0.6376, Validation Accuracy: 77.74%
 Epoch 16 - Test Accuracy: 86.89%
 Epoch 17 - Training Loss: 0.9285, Training Accuracy: 68.20%
+Epoch 17 - Validation Loss: 0.6283, Validation Accuracy: 77.28%
+Epoch 17 - Test Accuracy: 88.22%
